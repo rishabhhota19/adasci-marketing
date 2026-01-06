@@ -1,120 +1,121 @@
 import streamlit as st
 import os
+import asyncio
+from datetime import datetime
 from dotenv import load_dotenv
-from llama_index.llms.gemini import Gemini
+
+from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core.tools import FunctionTool
-from llama_index.core.agent import FunctionCallingAgentWorker, AgentRunner
+from llama_index.core.agent.workflow import AgentWorkflow
 
 load_dotenv()
-llm = Gemini(model="models/gemini-1.5-flash", api_key=os.getenv("GEMINI_API_KEY"))
 
-# Page Config
-st.set_page_config(
-    page_title="Ad Copy Generator",
-    page_icon="🚀",
-    layout="centered",
+# Initialize LLM using the new Google GenAI SDK
+llm = GoogleGenAI(
+    model="gemini-2.5-flash",
+    api_key=os.getenv("GEMINI_API_KEY"),
 )
 
-# App Header
-st.title("🚀 Ad Copy Generator")
-st.subheader("Fill out the campaign details below to generate ad copies")
+st.set_page_config(page_title="Ad Copy Generator", layout="centered")
+st.title("🚀 Agentic Ad Copy Generator")
+st.subheader("Generates *real* ad copy with an agent + tools")
 
-# Form
-with st.form("ad_copy_form"):
-    st.markdown("### 📦 Product Details")
+with st.form("ad_form"):
     product_name = st.text_input("Product Name")
     product_description = st.text_area("Product Description")
-    problem_solved = st.text_area("The Problem It Solves")
-    usp = st.text_input("Unique Selling Proposition (USP) [Optional]")
+    problem = st.text_area("Problem it solves")
+    usp = st.text_input("USP (Optional)")
 
-    st.markdown("### 🎯 Target Audience")
-    age_group = st.selectbox(
-        "Target Age Group",
-        ["18-24", "25-34", "35-44", "45-54", "55+"]
-    )
-    gender = st.selectbox(
-        "Target Gender",
-        ["All Genders", "Male", "Female", "Non-binary"]
-    )
+    age_group = st.selectbox("Age Group", ["18-24", "25-34", "35-44", "45-54", "55+"])
+    gender = st.selectbox("Target Gender", ["All Genders", "Male", "Female", "Non-binary"])
+    goal = st.selectbox("Campaign Goal", ["Lead Generation", "Sales", "Brand Awareness", "Website Visits"])
+    tone = st.selectbox("Tone", ["Friendly", "Professional", "Fun"])
 
-    st.markdown("### 🏆 Campaign Settings")
-    campaign_goal = st.selectbox(
-        "Campaign Goal",
-        ["Lead Generation", "Sales", "Brand Awareness", "Website Visits"]
-    )
-    tone = st.selectbox(
-        "Desired Tone",
-        ["Friendly", "Professional", "Fun"]
-    )
-
-    submitted = st.form_submit_button("Generate Ad Copy")
+    submitted = st.form_submit_button("Generate Ad Copies")
 
 if submitted:
-    # Combine inputs into a prompt context string
+
+    # ========== FUNCTION CALL TRACKER ==========
+    function_call_log = []  # Tracks all function calls
+    
+    # Build the shared context for prompts
     context = f"""
-    Product Name: {product_name}
-    Product Description: {product_description}
-    The Problem It Solves: {problem_solved}
-    Unique Selling Proposition (USP): {usp}
-    Target Audience:
-        Age Group: {age_group}
-        Gender: {gender}
-    Campaign Goal: {campaign_goal}
-    Desired Tone: {tone}
-    """
+Product: {product_name}
+Description: {product_description}
+Problem: {problem}
+USP: {usp}
+Audience: {age_group}, {gender}
+Goal: {goal}
+Tone: {tone}
+"""
 
-    # --- Define the ad generation function (must accept arguments) ---
+    # Define the ad generator function WITH TRACKING
     def generate_ad(platform: str) -> str:
+        """Generate a ready-to-post ad copy for the specified platform."""
+        # LOG THE FUNCTION CALL
+        call_time = datetime.now().strftime("%H:%M:%S")
+        function_call_log.append({
+            "function": "generate_ad",
+            "platform": platform,
+            "time": call_time
+        })
+        print(f"✅ FUNCTION CALLED: generate_ad(platform='{platform}') at {call_time}")
+        
         prompt = (
-            f"Generate a high-converting ad copy for {platform}.\n"
-            f"Product Details:\n{context}\n\n"
-            f"Requirements:\n"
-            f"- Tailor the ad copy for {platform} audience.\n"
-            f"- Match the campaign goal: {campaign_goal}.\n"
-            f"- Keep the tone: {tone}.\n"
-            f"- Use an engaging Call-to-Action.\n"
+            f"Create a READY-TO-POST ad copy for {platform}.\n"
+            f"{context}"
+            "\nConstraints:\n"
+            "- Only return the ad text (no explanation)\n"
+            "- Strong call-to-action\n"
         )
-        response = llm.complete(prompt)
-        return response.text.strip()
+        result = llm.complete(prompt)
+        return result.text.strip()
 
-    # --- Wrap the function as a FunctionTool with correct signature ---
+    # Wrap it in a FunctionTool
     ad_tool = FunctionTool.from_defaults(
         fn=generate_ad,
         name="generate_ad",
-        description="Generate ad copy for a specific platform. Accepts platform name as argument.",
+        description="Generate an ad copy given the platform (Facebook, Instagram, LinkedIn, or Google Ads)"
     )
 
-    # --- Create a single agent with the tool ---
-    ad_agent = FunctionCallingAgentWorker.from_tools(
-        [ad_tool],
+    # Create the agent using the new AgentWorkflow API
+    workflow = AgentWorkflow.from_tools_or_functions(
+        tools_or_functions=[ad_tool],
         llm=llm,
-        system_prompt="You are an expert ad copywriter. You generate high-converting ads for specific platforms using structured inputs.",
+        system_prompt=(
+            "You are an ad generation agent. "
+            "Use the generate_ad function to produce ad copy for different platforms. "
+            "When asked to generate an ad for a platform, call the generate_ad function with that platform name."
+        ),
     )
 
-    ad_runner = AgentRunner(ad_agent)
-
-    # --- Generate ad copies for all platforms ---
     platforms = ["Facebook", "Instagram", "LinkedIn", "Google Ads"]
-    ad_copies = {}
+    results = {}
 
-    for platform in platforms:
-        response = ad_runner.chat(f"Generate ad copy for {platform}")
-        ad_copies[platform] = response.response
+    async def generate_all_ads():
+        for p in platforms:
+            response = await workflow.run(user_msg=f"Generate an ad for {p}")
+            results[p] = str(response)
+        return results
 
-    # --- Display ad copies ---
-    st.success("✅ Ad Copies Generated Successfully!")
-    st.markdown("### ✨ Preview of Ad Copies:")
-    for platform, copy in ad_copies.items():
-        with st.expander(f"{platform} Ad Copy"):
-            st.write(copy)
+    with st.spinner("🔥 Generating ad copies…"):
+        asyncio.run(generate_all_ads())
 
-    # --- Allow download ---
-    all_ads_text = "\n\n".join(
-        f"--- {platform} Ad Copy ---\n{copy}" for platform, copy in ad_copies.items()
-    )
-    st.download_button(
-        label="📥 Download All Ad Copies (TXT)",
-        data=all_ads_text,
-        file_name="ad_copies.txt",
-        mime="text/plain",
-    )
+    # ========== DISPLAY FUNCTION CALL LOG ==========
+    st.markdown("---")
+    st.markdown("### 🔍 Function Call Log")
+    if function_call_log:
+        st.success(f"✅ **generate_ad** was called **{len(function_call_log)}** times!")
+        for call in function_call_log:
+            st.write(f"• `{call['function']}(platform='{call['platform']}')` at {call['time']}")
+    else:
+        st.error("❌ **generate_ad** was NOT called! The agent did not use the tool.")
+    st.markdown("---")
+
+    st.success("✅ Ads Generated!")
+    for plat, txt in results.items():
+        with st.expander(f"{plat} Ad Copy"):
+            st.write(txt)
+
+    combined = "\n\n".join(f"--- {plat} ---\n{txt}" for plat, txt in results.items())
+    st.download_button("📥 Download Ads", combined, "ads.txt", "text/plain")
